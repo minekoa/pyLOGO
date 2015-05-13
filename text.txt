@@ -1,0 +1,781 @@
+*[プログラミングその他]Logo基礎文法実装最速マスター
+
+結構頑張って書いた Logo基礎文法最速マスター ですが、[http://d.hatena.ne.jp/tt_clown/20100202/1265096776:title=はてな的プログラミング言語人気ランキング] ですと、最下位らへんをさまよっておりまする...。おかしいな、今頃は Logo 人口がグングン増して、みんなタートルで遊んでいるハズだったのに...。こんなハズじゃなかった。
+
+というわけで、コテ入れです。
+
+今回の記事は Logoの基礎文法を実装してしまえ、という試みです。だって、
+
+>http://d.hatena.ne.jp/minekoa/20100203/1265202628:title>
+他のLisp言語をある程度知っている人はこれを読めば Logo の基礎をマスターして Logo <span style="font-weight:bold;">処理系を</span>書くことができるようになります。
+<<
+
+なんて行った手前もありますし、やっぱり<span style="font-weight:bold;">文法を理解するには実装するのが一番</span>です！これなら はてなーさん にも人気でるかな？自分で作った処理には愛着も沸きますしね。
+
+
+名付けて 「Logo基礎文法<span style="font-weight:bold;">実装</span>最速マスター」。普通にプログラミングに親しんでいる方なら、これを見れば週末にチョコチョコっと Logo を実装できてしまうハズです。
+
+====
+
+**作戦会議
+実装時間が全然ないので、開発言語は Lightweight かつ 多くの人が知ってそうで、かつ わたしが慣れている Python をチョイス！（ホントは Smalltalk にしたかったけれど、どれだけ記事がニッチになるのやら・・と断念。）
+
+作戦としては、Scanner は、空白区切りでトークンセパレートするお手軽実装。ちょっと面倒ですが、分かち書きしてください・・と割り切ります。Logo は基本的には LL(1)文法なので、Parser は再帰下降解析で。実行は 作られた構文木をそのまま実行する方法で行きます。
+
+注意すべきは構文解析で、
+-何処までが関数の引数なのかは構文からでは判断できない
+-二項演算子がある
+の2点。前者は文脈依存するということで、ちょっとイヤラシイ。後者は・・まぁ、手間が掛かるということで。対応しないという選択肢もあるかな？（ぉ
+
+あ、あとエラーは全部
+
+>|python|
+class LGRuntimeError(Exception):
+     def __init__(self, msg): self.message = msg
+     def __str__(self): return self.message
+||<
+
+でお茶を濁す方向で。
+
+**スキャナ（手抜き版）の作成
+
+トークン種別と、文字列からそのトークンになるかを判別するメソッドをもつ LGTokenType を定義します。
+
+>|python|
+class LGTokenType(object):
+
+    Word  = "Word"         # 語
+    QWrd  = "QuoWord"      # quote (") + 語
+    DWrd  = "DotWord"      # dot(:) + 語
+    NWrd  = "NumWord"      # 語(数字のみで構成された語)
+    LOpn  = "ListOpen"     # List 開くカッコ
+    LCls  = "ListClose"    # List 閉じるカッコ
+    GOpn  = "GroupingOpen" # グルーピング 開くカッコ
+    GCls  = "GroupingClose"# グルーピング 閉じるカッコ
+
+    def __init__(self):
+        self.wordptn  = re.compile( r"[a-zA-Z0-9_\.]+$" );
+        self.qwrdptn  = re.compile( r"\"[a-zA-Z0-9_\.]+$" );
+        self.dwrdptn  = re.compile( r"\:[a-zA-Z0-9_\.]+$" );
+        self.nwrdptn  = re.compile( r"[+-]?[0-9]+\.?[0-9]*$" );
+        self.lopnptn  = re.compile( r"\[" );
+        self.lclsptn  = re.compile( r"\]" );
+        self.gopnptn  = re.compile( r"\(" );
+        self.gclsptn  = re.compile( r"\)" );
+
+    def typeOf(self, token):
+        if self.nwrdptn.match( token ): return LGTokenType.NWrd
+        if self.qwrdptn.match( token ): return LGTokenType.QWrd
+        if self.dwrdptn.match( token ): return LGTokenType.DWrd
+        if self.wordptn.match( token ): return LGTokenType.Word
+        if self.lopnptn.match( token ): return LGTokenType.LOpn
+        if self.lclsptn.match( token ): return LGTokenType.LCls
+        if self.gopnptn.match( token ): return LGTokenType.GOpn
+        if self.gclsptn.match( token ): return LGTokenType.GCls
+        raise LGRuntimeError( 'unknown token type "%s"' % token )
+||<
+
+ここら辺は正規表現でバリバリと。で、スキャナー本体ですが、手抜きと時間短縮のため、必ずスペースで分かち書きして貰うようにします。とはいえ Logo でこれが問題になるのは、リストとグルーピングの括弧（各括弧、丸括弧）だけ。
+
+>|logo|
+print [hello world]     ;←これはNG
+print [ hello world ]   ;←これはOK
+||<
+
+と気をつけて貰えばすむ話なので、目をつむってしまいます。実装は
+
+>|python|
+class LGEzScanner(object):
+    def __init__(self, source):
+        toktype = LGTokenType()
+        self.tokenGenarator = ((i, toktype.typeOf(i)) for i in source.split())
+        self.tokenValue = None
+        self.tokenType  = None
+
+    def advance(self):
+        self.tokenValue, self.tokenType = self.tokenGenarator.next()
+
+    def getTokenType(self): return self.tokenType
+    def getTokenValue(self): return self.tokenValue
+||<
+
+こんな感じ。Python のジェネレータを使って 大変手抜きをしています（名前のEz あたりに良心の呵責が）。
+
+
+**データパーザの作成
+
+Parser は、
+
++データ （{語|リスト} のリスト）として解析する
++プログラムとして解析する
+
+の2段階に分けて解析します。
+
+というのも、Logo の構文解析は、現在の環境に定義されている関数の引数の数により解析結果が変わってしまうのですが、再帰や相互参照する関数を実現するには、リスト（関数ボディ）の構文解析をギリギリまで遅延させてあげないとダメだからです。
+
+構文要素。まずは「語」系
+
+>|python|
+class LGWord( object ):
+    def __init__(self, value): self.value = value
+    def evalute(self, context): pass
+    def __str__(self): return self.value
+
+class LGQuoWord( object ):
+    ''' "語 '''
+    def __init__(self, value): self.value = value
+    def evalute(self, context): pass
+    def __str__(self): return self.value
+
+class LGDotWord( object ):
+    ''' :語 '''
+    def __init__(self, value): self.value = value
+    def evalute(self, context): pass
+    def __str__(self): return self.value
+
+class LGNumWord( object ):
+    def __init__(self, value):
+        ''' 引数 value は 文字列でも 数値でも OK! '''
+        self.vstr  = str(value)
+        try:
+            ivalue = int(value)
+            fvalue = float(value)
+            self.value = ivalue if ivalue == fvalue else fvalue
+        except ValueError:
+            self.value = float(value)
+
+    def evalute(self, context): pass
+    def __str__(self): return self.vstr
+||<
+
+evalute はとりあえず後回し。次はリストとグループ
+
+>|python|
+class LGList( object ):
+    def __init__(self): self.values = []
+    def append(self, value): self.values.append( value )
+    def __getitem__(self, key): return self.values.__getitem__(key)
+    def evalute(self, context): pass
+
+    def __str__(self):
+        return '[%s]' % ' '.join(i.__str__() for i in self.values)
+
+class LGGroup( object ):
+    def __init__(self): self.values = []
+    def append(self, value): self.values.append( value )
+    def __getitem__(self, key): return self.values.__getitem__(key)
+    def evalute(self, context): pass
+
+    def __str__(self):
+        return '(%s)' % ' '.join(i.__str__() for i in self.values)
+||<
+
+こんな感じです。
+
+そして肝心のデータパーザ。
+
+>|python|
+class LGDataParser(object):
+    def parse(self, scanner):
+        self.scanner = scanner
+        rootlist = LGList();
+
+        try:
+            self.list_(rootlist)
+        except StopIteration:
+            pass
+        return rootlist
+
+    def list_(self, currentlist):
+        while True:
+            self.scanner.advance()
+            toktype = self.scanner.getTokenType()
+            tokval  = self.scanner.getTokenValue()
+
+            if toktype == LGTokenType.Word:
+                currentlist.append( LGWord(tokval) )
+            if toktype == LGTokenType.QWrd:
+                currentlist.append( LGQuoWord(tokval) )
+            if toktype == LGTokenType.NWrd:
+                currentlist.append( LGNumWord(tokval) )
+            if toktype == LGTokenType.DWrd:
+                currentlist.append( LGDotWord(tokval) )
+
+            if toktype == LGTokenType.LOpn:
+                currentlist.append( LGList() )
+                self.list_( currentlist[-1] )
+            if toktype == LGTokenType.LCls:
+                return
+
+            if toktype == LGTokenType.GOpn:
+                currentlist.append( LGGroup() )
+                self.group( currentlist[-1] )
+            if toktype == LGTokenType.GCls:
+                raise LGRuntimeError("unexpected ')'")
+
+    def group(self, currentgroup):
+        while True:
+            self.scanner.advance()
+            toktype = self.scanner.getTokenType()
+            tokval  = self.scanner.getTokenValue()
+
+            if toktype == LGTokenType.Word:
+                currentgroup.append( LGWord(tokval) )
+            if toktype == LGTokenType.QWrd:
+                currentgroup.append( LGQuoWord(tokval) )
+            if toktype == LGTokenType.NWrd:
+                currentgroup.append( LGNumWord(tokval) )
+            if toktype == LGTokenType.DWrd:
+                currentgroup.append( LGDotWord(tokval) )
+
+            if toktype == LGTokenType.LOpn:
+                currentgroup.append( LGList() )
+                self.list_( currentgroup[-1] )
+            if toktype == LGTokenType.LCls:
+                raise LGRuntimeError("unexpected ']'")
+
+            if toktype == LGTokenType.GOpn:
+                currentgroup.append( LGGroup() )
+                self.group( currentgroup[-1] )
+            if toktype == LGTokenType.GCls:
+                return
+||<
+
+ま～、これは「まんま」なので特に見るところはないです、ハイ。
+
+
+**コンテキストの作成
+順番的にはムチャクチャですが、コンテキストから関数を探索できないと構文解析できないので、作らないと！・・な実行コンテキストです。
+
+>|python|
+class LGContext(object):
+    def __init__(self, parent=None):
+        self.parent = parent
+        self.variables = {}
+        self.functions = {}
+
+    def makeVariable(self, name, value):
+        '''変数に値を代入する。
+        無いときはグローバルスコープに変数を作る'''
+        if self.variables.has_key(name):
+            self.variables[name] = value
+        elif self.parent == None:
+            self.variables[name] = value
+        else:
+            self.parent.makeVariable(name, value)
+
+    def makeLocalVariable(self, name, value):
+        '''変数に値を代入する。
+        無いときはローカルスコープに変数を作る'''
+        self.variables[name] = value
+
+    def makeFunction(self, name, func):
+        if self.parent == None:
+            self.functions[name] = func
+        else:
+            self.parent.makeFunction(name, func)
+
+    def findVariable(self, name):
+        if self.variables.has_key(name):
+            return self.variables[name]
+        elif self.parent == None:
+            raise LGRuntimeError( '%s has no value' % name )
+        else:
+            return self.parent.findVariable(name)
+
+    def findFunction(self, name):
+        if self.functions.has_key(name):
+            return self.functions[name]
+        elif self.parent == None:
+            raise LGRuntimeError( "I don't know how  to %s" % name )
+        else:
+            return self.parent.findFunction(name)
+||<
+
+基本的には、変数と関数を保持るだけのオブジェクト。親子連結可能にします。
+
+
+
+**プログラムパーザの作成
+
+[http://d.hatena.ne.jp/minekoa/20100203/1265202628:title=接触編]の「まとめ」の通り、Logo の文法は、
+
+>||
+LOGOプログラム ::= { コマンド }*
+コマンド       ::= 手続き名 + { 入力 }*
+入力           ::= "語 | リスト | オペレーション
+オペレーション ::= 手続き名 + { 入力 }*
+語             ::= { 英数字 | 特殊記号 }*
+リスト         ::= { { 語 | リスト }* }
+||<
+
+にドット表現、数値語の暗黙クォート、中置オペレーション、to～end を加えたもの。
+
+特徴的なのは「コマンド」と「オペレーション」があること。即ち「文」と「式」の区別があることです。ここらへんが Logo の立ち位置を非常に微妙にする（手続き言語なのか関数言語なのか、非常にコウモリちっく）ある意味Logoの特徴的な部分なのですが、ですが、<span style="font-weight:bold;">今回は文と式の区別を無くしてしまいます</span>。
+
+一つはもちろん手抜きの為ですが、もう一つは 既存の Logo処理系でもトップレベルで 式（＝入力）を実行するのは、一応 "You don't say..." なんてブツクサ文句を垂れながらもやってくれますし、この挙動は非常に便利だからです((実は、一度はコマンドをオペレーションを分ける実装を追えていたのですが、使っててとっても面倒で作り直してしまいました/なので「時間短縮」には成っていません(^^; ))。
+
+
+
+リストをプログラムとして解析する パーザーを作成します。まず、新たな要素を定義。
+
+>|python|
+class LGOperation( object ):
+    def __init__(self, name ):
+        self.name = name
+        self.args = []
+
+    def appendArgument(self, argument): self.args.append(argument)
+    def evalute(self, context): pass
+    def __str__(self): return self.name
+
+class LGProgram( object ):
+    def __init__(self): self.expressions = []
+    def appendExpression(self, exp): self.expressions.append( exp )
+    def evalute(self, context): pass
+    def __str__(self): return 'a Logo Program'
+||<
+
+パーザは、基本的に再帰下降解析の教科書通り。
+
+>|python|
+class LGProgramParser(object):
+    def __init__(self, context):
+        self.context = context
+
+    def initSource(self, list_):
+        class Scanner(object):
+            def __init__(self, list_):
+                self.list_ = list_
+                self.cnt   = -1
+            def advance(self):
+                self.cnt += 1
+                if self.cnt >= len(self.list_.values):
+                    raise StopIteration
+            def getElement(self): return self.list_[self.cnt]
+            def nextElement(self): return self.list_[self.cnt +1]
+
+
+        self.scanner = Scanner( list_ )
+
+    def parse(self, list_):
+        self.initSource(list_)
+        return self.program()
+
+    def program(self):
+        '''LOGOプログラム ::= {式}*'''
+        prg = LGProgram()
+        try:
+            while True:
+                prg.appendExpression( self.expression() )
+        except StopIteration:
+            pass
+        return prg
+
+    def expression(self):
+        '''式 ::= "語 | 数値語 | :語 | リスト | オペレーション | グループ'''
+        try:
+            elm = self.scanner.nextElement()
+        except IndexError:
+            raise StopIteration
+
+        if (type(elm) == LGQuoWord or
+            type(elm) == LGNumWord or
+            type(elm) == LGDotWord or
+            type(elm) == LGList):
+            self.scanner.advance()
+            return self.scanner.getElement()
+        if type(elm) == LGWord:
+            return self.operation()
+        if type(elm) == LGGroup:
+            self.scanner.advance()
+            return self.parseGroup( self.scanner.getElement() )
+        raise LGRuntimeError('parse error (expression) %s' % type(elm) )
+
+
+    def operation(self):
+        '''オペレーション ::= 手続き名 {式}*'''
+        # 手続き名
+        self.scanner.advance()
+        elm = self.scanner.getElement()
+        if type(elm) != LGWord:
+            raise LGRuntimeError("parse error (operation)")
+        ope = LGOperation( elm.value )
+
+        # 式
+        func = self.context.findFunction( ope.name )
+        for i in range(0, func.requieredArgCount()):
+            try:
+                ope.appendArgument( self.expression() )
+            except IndexError:
+                raise LGRuntimeError('not enough inputs to %s' % ope.name )
+
+        return ope
+
+    def parseGroup(self, grp):
+        if type(grp) != LGGroup:
+            raise LGRuntimeError("parse error (operation) %s" % type(grp))
+        parser = LGProgramParser( self.context )
+        parser.initSource(grp)
+        return parser.group( len(grp.values) -1)
+
+    def group(self, argc):
+        '''グループ ::= グループオペレーション | "語 | 数値語 | :語 | リスト'''
+        elm = self.scanner.nextElement()
+        if type(elm) == LGWord:
+            return self.groupOperation(argc)
+        if (type(elm) == LGQuoWord or
+            type(elm) == LGNumWord or
+            type(elm) == LGDotWord or
+            type(elm) == LGList):
+            if argc != 0: raise LGRuntimeError("too much inside ()'s")
+            self.scanner.advance()
+            return self.scanner.getElement()
+        raise LGRuntimeError('parse error (group) %s' % type(elm) )
+
+    def groupOperation(self, argc):
+        '''グループオペレーション ::=  手続き名 {式}*'''
+        # 手続き名
+        self.scanner.advance()
+        elm = self.scanner.getElement()
+        if type(elm) != LGWord:
+            raise LGRuntimeError("parse error (operation)")
+        ope = LGOperation( elm.value )
+
+        # 式
+        func = self.context.findFunction( ope.name )
+        for i in range(0, argc):
+            try:
+                ope.appendArgument( self.expression() )
+            except IndexError:
+                raise LGRuntimeError('not enough inputs to %s' % ope.name )
+
+        return ope
+||<
+
+グルーピングカッコの処理当たりが力業で、グループの部分だけ トークンリストが 枝分かれしてしまっているので、枝を別のパーザオブジェクトで全部パーズしてしまう parseGroup で力押し。うーん、 DataParser でしくじったかしら。ちょっと汚いですが、このままいっちゃいます。
+
+Logo の構文解析は、コンテキスト依存します。今ある環境から関数定義を捜してきて、関数定義に要求される引数の数を聞かないと解析できません。具体的には LGProgramParser.operation() メソッドの
+
+>|python|
+func = self.context.findFunction( ope.name )
+for i in range(0, func.requieredArgCount()):
+　　・
+　　・
+||<
+
+の部分です。これは文法的にちょっといけてないし、いろいろ面倒なところなので、処理系によっては引数リストを Cのような カッコで囲ってしまう方言もあるようです。
+
+
+**構文木を実行可能にする
+ようやくひとまずのゴールに。
+
+棚上げしていた evaluate メソッドを定義します。まずは Word 四兄弟。
+
+>|python|
+class LGWord( object ):
+    def evaluate(self, context):
+        raise LGRuntimeError( 'not-evalutable-exception' )
+
+class LGQuoWord( object ):
+    ''' "語 '''
+    def evaluate(self, context): return self
+    def thing(self): return LGWord( self.value[1:] )
+
+class LGNumWord( object ):
+    def evaluate(self, context): return self
+    def thing(self): return self
+
+class LGDotWord( object ):
+    ''' :語 '''
+    def evaluate(self, context):
+        return context.findVariable( self.value[1:] )
+||<
+
+thing は クォートされている Word にのみ定義して、クォート をはずします。
+
+
+お次はオペレーションとプログラム（ついてにグループも）
+
+>|python|
+class LGGroup( object ):
+    def evaluate(self, context):
+        raise LGRuntimeError( 'not-evalutable-exception' )
+
+class LGOperation( object ):
+    def evaluate(self, context):
+        func = context.findFunction( self.name )
+        try:
+            return func.evaluate(context,
+                                [i.evaluate(context) for i in self.args])
+        except LGInputError, err: 
+            raise LGRuntimeError( '%s %s' % (self.name, err) )
+
+class LGProgram( object ):
+    def evaluate(self, context):
+        retVal = None
+        for expression in self.expressions:
+            retVal = expression.evaluate( context )
+        return retVal
+||<
+
+オペレーションでキャッチしている LGInputError は Logo の関数が引数の型に対してダメ出しするエラーです。
+
+>|python|
+class LGInputError(Exception):
+     def __init__(self, ngInput):
+         self.ngInput = ngInput
+     def __str__(self):
+         return "doesn't like %s as input" % self.ngInput
+||<
+
+当初 LGRuntimeError に一本化しようと思ったのですが、同じメッセージ生成のコードのコピペは増えるし、実は関数の中からではホントの関数名は判らないとかあったので、こういう形に。
+
+List はちょっとややこしくって、run したときののみ プログラムとして 評価されます。ここらへんは Quote語のthing と同じルールです。
+
+>|python|
+class LGList( object ):
+    def __init__(self):
+        self.values = []
+        self.quoteCnt = 1
+
+    def evaluate(self, context):
+        return self
+
+    def run(self, context):
+        import logoParser
+        parser = logoParser.LGProgramParser( context )
+        tree = parser.parse( self )
+        return tree.evaluate( context)
+||<
+
+と、ちょっと汚いコードになってしまいました。（evaluate は自身を返して、特別な挙動として外から run を呼んで貰うというのも考えたのですが、一長一短です）
+
+
+ * * *
+
+
+ここまでやればひとまず動きます。サンプルのプリミティブ関数として、暫定版の sum と print、make を定義し（ホントはもちょっと処理が要ります）、インタプリタとして借り組みします。
+
+>|python|
+from logoParser import *
+from logoScanner import *
+from logoContext import *
+
+class SumFunc(object):
+    def requieredArgCount(self): return 2
+    def evaluate(self, context, args):
+        ret = 0
+        for i in args: ret += i.value
+        return LGNumWord( ret )
+
+class PrintFunc(object):
+    def requieredArgCount(self): return 1
+    def evaluate(self, context, args):
+        if ( type(args[0]) == LGQuoWord or
+             type(args[0]) == LGNumWord ):
+            print( args[0].thing().__str__() )
+        if type(args[0]) == LGList:
+            print( args[0].__str__()[1:-1] )
+
+class MakeFunc(object):
+    def requieredArgCount(self): return 2
+    def evaluate(self, context, args):
+        if type(args[0]) != LGQuoWord: raise LGInputError( args[0] )
+        context.makeVariable( args[0].thing().value, args[1] )
+
+if __name__ == '__main__':
+    context = LGContext()
+    context.makeFunction( 'sum', SumFunc() )
+    context.makeFunction( 'print', PrintFunc() )
+    context.makeFunction( 'make', MakeFunc() )
+
+    dparser = LGDataParser()
+    pparser = LGProgramParser( context )
+
+    while True:
+        source = raw_input( '>>>' )
+
+        try:
+            scanner = LGEzScanner( source )
+            lst  = dparser.parse( scanner )
+            tree = pparser.parse( lst )
+            ret  = tree.evaluate( context )
+            if ret != None:
+                print( "You don't say what to do with %s" % ret )
+        except LGRuntimeError, err:
+            print( err )
+||<
+
+実行してみます。
+
+[f:id:minekoa:20100207180057p:image]
+
+
+
+嬉しく成っちゃう瞬間ですねっ！
+
+
+**インターミッション
+
+とりあえずプリミティブは、thing、run、define あたりを加えておきます。
+
+>|python|
+class ThingFunc(object):
+    def requieredArgCount(self): return 1
+    def evaluate(self, context, args):
+        if type(args[0]) != LQuoWord: raise LGInputError( args[0] )
+        return args[0].thing()
+
+class RunFunc(object):
+    def requieredArgCount(self): return 1
+    def evaluate(self, context, args):
+        if type(args[0]) != LGList: raise LGInputError( args[0] )
+        return args[0].run(context)
+
+class LogoFunction(object):
+    def __init__(self, args, body):
+        self.args = args
+        self.body = body
+
+    def requieredArgCount(self): return len(self.args)
+
+    def evaluate(self, context, args):
+        newContext = LGContext( context )
+        for i in range(0, self.requieredArgCount()):
+            newContext.makeLocalVariable( self.args[i].value, args[i] )
+
+        ret = None
+        for line in self.body:
+            ret = line.run(newContext)
+        return ret
+
+class DefineFunc(object):
+    def requieredArgCount(self): return 2
+    def evaluate(self, context, args):
+        '''
+        define "opeFoo [[arg1 arg2]
+                        [make "hoge sum thing "arg1  256]
+                        [output prduct thing "hoge arg2]]
+        '''
+        if type(args[0]) != LGQuoWord: raise LGInputError( args[0] )
+        if type(args[1]) != LGList:  raise LGInputError( args[1] )
+        body = LGList()
+        for i in args[1][1:]:
+            body.append(i)
+        func = LogoFunction( args[1][0].values, body)
+        context.makeFunction(args[0].thing().value, func)
+||<
+
+細かい見落としはあるかもですが、関数の定義とリストの実行さえ出来れば 腐っても Lisp風言語です、あとは二項演算子絡みのものを除いた、残りについては（ifelse とか repeatとか）は Logo上で作れるハズ。
+
+
+**二項演算子
+
+で、その二項演算子なのですが、これがちょっと厄介で。
+
+>||
+式 ::= {式 '+' 式 | 値}
+||<
+
+みたいなものですが、これを再帰下降解析すると、「式 + 式」であることを確定するために、一つ先読みすればいい・・とやろうとしても、演算子の左側が再帰してしまって、無限ループになってしまいます。「左再帰」と言って、再帰降下解析の苦手なパターンの一つなのですがこれは、
+
+>||
+式 ::= 項 | 
+       項 { {'+'|'-'|'*'|'/'} 項}*
+項 ::= 値
+||<
+
+みたいにして回避します。
+
+イメージ的には こういう探索
+
+>||
+((((値 '+' 値) '+' 値) '+' 値) '+' 値)
+||<
+
+を、こんな風に変形
+
+>||
+値 ('+' 値)('+' 値)('+' 値)('+' 値)
+||<
+
+するカンジ？
+
+
+さて、実装開始。プログラムパーザが主役なのですが、まずは下準備。トークンの型と、
+
+>|python|
+class LGTokenType(object):
+
+    Word  = "Word"          # 語
+    QWrd  = "QuoWord"       # quote (") + 語
+               ・
+               ・
+    BOpe  = "BinaryOperator"# 二項演算子　 #<=追加
+
+    def __init__(self):
+               ・
+               ・
+        self.bopeptn  = re.compile( r"[+\-\/\*\<\>\=]" ) #<=追加
+
+    def typeOf(self, token):
+        if self.nwrdptn.match( token ): return LGTokenType.NWrd
+        if self.qwrdptn.match( token ): return LGTokenType.QWrd
+        if self.dwrdptn.match( token ): return LGTokenType.DWrd
+        if self.bopeptn.match( token ): return LGTokenType.BOpe #<=追加
+               ・
+               ・
+||<
+
+データパーザ用の構文要素、
+
+>|python|
+class LGBinOpeWord( object ):
+    def __init__(self, value): self.value = value
+    def __str__(self): return self.value
+    def evaluate(self, context):
+        raise LGRuntimeError( 'not-evalutable-exception' )
+||<
+
+データパーザ、
+
+>|python|
+class LGDataParser(object):
+    def list_(self, currentlist):
+        while True:
+            self.scanner.advance()
+            toktype = self.scanner.getTokenType()
+            tokval  = self.scanner.getTokenValue()
+
+            if toktype == LGTokenType.Word:
+                currentlist.append( LGWord(tokval) )
+                           ・
+                           ・
+            if toktype == LGTokenType.BOpe:                #<=追加
+                currentlist.append( LGBinOpeWord(tokval) ) #<=追加
+                           ・
+                           ・
+
+
+    def group(self, currentgroup):
+        while True:
+            self.scanner.advance()
+            toktype = self.scanner.getTokenType()
+            tokval  = self.scanner.getTokenValue()
+
+            if toktype == LGTokenType.Word:
+                currentgroup.append( LGWord(tokval) )
+                           ・
+                           ・
+            if toktype == LGTokenType.BOpe:                #<=追加
+                currentgroup.append( LGBinOpeWord(tokval) )#<=追加
+                           ・
+                           ・
+||<
+
+と、プログラムパーザまで二項演算子の情報のパスを通します。
+
+
+
+え？ 演算子の優先順位に対処できてない？・・・・こまけぇこたぁいいんだよっ！（パーザジェネレータ使えば良かった ...orz）
